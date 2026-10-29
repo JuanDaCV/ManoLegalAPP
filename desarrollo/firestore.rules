@@ -1,0 +1,396 @@
+rules_version = '2';
+
+// Reglas de seguridad de Cloud Firestore para ManoLegal V2.
+//
+// Principio de diseño: cada dato tiene UN solo actor autorizado a escribirlo.
+//
+//   | Dato                                   | Único que lo escribe          |
+//   |----------------------------------------|-------------------------------|
+//   | Campos editables del perfil            | El abogado dueño              |
+//   | estado / verificado                    | Solo el administrador         |
+//   | calificacionPromedio, cantidadResenas  | Solo la Cloud Function        |
+//   | Reseña                                 | El cliente autor, no el abogado |
+//   | PQRS (datos de la solicitud)           | El usuario autor, al crearla  |
+//   | PQRS: radicado, estado, correo         | Solo la Cloud Function        |
+//
+// La Cloud Function usa el Admin SDK, que no pasa por estas reglas. Por eso
+// basta con prohibir esos dos campos a TODO cliente para que el promedio de
+// calificación sea inforjable.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------
+    // Funciones auxiliares
+    // ---------------------------------------------------------------
+
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    function esDuenio(uid) {
+      return autenticado() && request.auth.uid == uid;
+    }
+
+    // La identidad administrativa se basa en el correo del token de
+    // Authentication. No se usan custom claims a propósito: la cuenta de
+    // administrador es fija y preexistente, y ningún otro usuario puede
+    // registrarse con esa dirección porque ya está ocupada en Authentication.
+    // Endurecimiento opcional: agregar
+    // `&& request.auth.token.email_verified == true`, pero solo después de
+    // verificar ese correo, porque si no el administrador queda bloqueado.
+    function esAdmin() {
+      return autenticado() && request.auth.token.email == 'admin@manolegal.com';
+    }
+
+    // Conjunto de campos que una actualización modifica. Solo es válido
+    // dentro de reglas `update`, donde `resource.data` existe.
+    function camposModificados() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Verdadero si la actualización no toca ninguno de los campos protegidos.
+    function noToca(protegidos) {
+      return !camposModificados().hasAny(protegidos);
+    }
+
+    function esCliente(uid) {
+      return exists(/databases/$(database)/documents/clientes/$(uid));
+    }
+
+    // Texto opcional de un mensaje de Lexus: ausente, nulo o una cadena corta.
+    function textoOpcionalLexus(valor, maximo) {
+      return valor == null || (valor is string && valor.size() <= maximo);
+    }
+
+    // Cabecera de una conversación con Lexus, tal como queda tras la escritura.
+    // El valor de las fechas (request.time) se exige aparte, en create/update.
+    //
+    // size() cuenta unidades UTF-16, no caracteres: un emoji vale 2. El título
+    // son 60 caracteres y una elipsis, que con emojis llegan a 121 unidades.
+    function conversacionLexusValida() {
+      let c = request.resource.data;
+      return c.keys().hasOnly(['titulo', 'creadoEn', 'actualizadoEn', 'turnos', 'estado'])
+          && c.keys().hasAll(['titulo', 'creadoEn', 'actualizadoEn', 'turnos', 'estado'])
+          && c.titulo is string
+          && c.titulo.size() >= 1
+          && c.titulo.size() <= 121
+          && c.creadoEn is timestamp
+          && c.actualizadoEn is timestamp
+          && c.turnos is int
+          && c.turnos >= 0
+          && c.turnos <= 30
+          && c.estado in ['activa', 'cerrada', 'expirada'];
+    }
+
+    // Mensaje de una conversación con Lexus, tal como queda tras la escritura.
+    // `orden` fija la posición: dos mensajes de un mismo lote comparten
+    // `momento`, así que la hora no sirve para ordenarlos.
+    //
+    // Los textos se acotan en unidades UTF-16 (ver size() arriba). La app admite
+    // 2000 caracteres del usuario, que con emojis llegan a 4000 unidades, y
+    // recorta la respuesta de Lexus a 4000 unidades: el tope es el mismo.
+    function mensajeLexusValido() {
+      let m = request.resource.data;
+      return m.keys().hasOnly(['autor', 'texto', 'momento', 'orden', 'estado', 'error', 'origen', 'urgente', 'areaSugerida', 'enHistorialModelo', 'textoParaModelo'])
+          && m.keys().hasAll(['autor', 'texto', 'momento', 'orden', 'estado', 'origen', 'urgente', 'enHistorialModelo'])
+          && m.autor in ['usuario', 'lexus']
+          && m.estado in ['enviando', 'enviado', 'fallido']
+          && m.origen in ['modelo', 'local']
+          && m.texto is string
+          && m.texto.size() > 0
+          && m.texto.size() <= 4000
+          && m.momento is timestamp
+          && m.orden is int
+          && m.orden >= 0
+          && m.orden < 500
+          && m.urgente is bool
+          && m.enHistorialModelo is bool
+          && textoOpcionalLexus(m.get('error', null), 40)
+          && textoOpcionalLexus(m.get('areaSugerida', null), 40)
+          && textoOpcionalLexus(m.get('textoParaModelo', null), 20000);
+    }
+
+    // La conversación, tal como quedará al terminar el lote, sigue activa y,
+    // si escribe la persona, aún tiene turnos. Usa getAfter() para que valga
+    // también cuando el mismo lote crea la conversación. Cuesta una lectura
+    // por cada mensaje que se escribe.
+    function conversacionLexusAdmite(uid, convId, autor) {
+      let conversacion = getAfter(/databases/$(database)/documents/clientes/$(uid)/conversacionesLexus/$(convId)).data;
+      return conversacion.estado == 'activa'
+          && (autor != 'usuario' || conversacion.turnos < 30);
+    }
+
+    // Validación compartida por la creación y la edición de una reseña.
+    function resenaValida(abogadoUid, clienteUid) {
+      return request.resource.data.calificacion is int
+          && request.resource.data.calificacion >= 1
+          && request.resource.data.calificacion <= 5
+          && request.resource.data.comentario is string
+          && request.resource.data.comentario.size() > 0
+          && request.resource.data.comentario.size() <= 500
+          && request.resource.data.abogadoUid == abogadoUid
+          && request.resource.data.clienteUid == clienteUid
+          // Obliga a usar FieldValue.serverTimestamp(): el cliente no puede
+          // inventar la fecha de su reseña.
+          && request.resource.data.fecha == request.time;
+    }
+
+    // ---------------------------------------------------------------
+    // Clientes
+    // ---------------------------------------------------------------
+
+    match /clientes/{uid} {
+      allow get: if esDuenio(uid) || esAdmin();
+      allow list: if esAdmin();
+      allow create: if esDuenio(uid);
+      allow update: if esDuenio(uid) && noToca(['uid']);
+      allow delete: if esAdmin();
+
+      // Conversaciones con Lexus: relatos jurídicos sensibles. Solo las lee y
+      // las escribe el cliente dueño; a propósito no hay excepción para
+      // esAdmin(). (El Admin SDK y la consola no pasan por las reglas.) Nadie
+      // las borra desde la app.
+      match /conversacionesLexus/{convId} {
+        allow get, list: if esDuenio(uid);
+
+        allow create: if esDuenio(uid)
+                      && esCliente(uid)
+                      && conversacionLexusValida()
+                      && request.resource.data.estado == 'activa'
+                      && request.resource.data.turnos == 0
+                      && request.resource.data.creadoEn == request.time
+                      && request.resource.data.actualizadoEn == request.time;
+
+        // Solo avanza: turnos +0 o +1, y de activa a cerrada o expirada, sin
+        // volver. Una conversación cerrada o expirada ya no admite cambios.
+        allow update: if esDuenio(uid)
+                      && conversacionLexusValida()
+                      && noToca(['creadoEn', 'titulo'])
+                      && (request.resource.data.turnos - resource.data.turnos) in [0, 1]
+                      && resource.data.estado == 'activa'
+                      && (!camposModificados().hasAny(['actualizadoEn'])
+                          || request.resource.data.actualizadoEn == request.time);
+
+        allow delete: if false;
+
+        match /mensajes/{mensajeId} {
+          allow get, list: if esDuenio(uid);
+
+          allow create: if esDuenio(uid)
+                        && mensajeLexusValido()
+                        && request.resource.data.momento == request.time
+                        && conversacionLexusAdmite(uid, convId, request.resource.data.autor);
+
+          // Solo el estado de entrega de un mensaje de la persona (y su
+          // posición al reintentar): el texto y el autor no cambian nunca.
+          // Se comprueba como 'lexus' porque la respuesta sube `turnos` en el
+          // mismo lote y el último turno llegaría al tope.
+          allow update: if esDuenio(uid)
+                        && resource.data.autor == 'usuario'
+                        && mensajeLexusValido()
+                        && camposModificados().hasOnly(['estado', 'error', 'enHistorialModelo', 'orden', 'momento'])
+                        && (!camposModificados().hasAny(['momento'])
+                            || request.resource.data.momento == request.time)
+                        && conversacionLexusAdmite(uid, convId, 'lexus');
+
+          allow delete: if false;
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Abogados: documento PRIVADO
+    //
+    // Contiene fecha de nacimiento, teléfono personal y rutas de los
+    // documentos de verificación. Un cliente NUNCA lo lee: para eso existe
+    // perfilesPublicosAbogados.
+    // ---------------------------------------------------------------
+
+    match /abogados/{uid} {
+      allow get: if esDuenio(uid) || esAdmin();
+      allow list: if esAdmin();
+
+      // Todo abogado nace pendiente de verificación. Sin esta condición,
+      // podría crearse directamente como verificado.
+      allow create: if esDuenio(uid)
+                    && request.resource.data.estado == 'pendiente';
+
+      // El dueño edita su perfil pero no su verificación: aquí se cierra el
+      // agujero de autoverificación que tenían las reglas anteriores.
+      allow update: if esDuenio(uid) && noToca(['estado', 'uid']);
+      allow update: if esAdmin();
+
+      allow delete: if esAdmin();
+
+      // Subcolección heredada: antes guardaba los archivos como Blob dentro
+      // de Firestore. Hoy los archivos viven en Cloud Storage. Se conserva
+      // lectura y borrado para poder limpiar datos antiguos sin perderlos,
+      // pero ya no se admiten escrituras nuevas.
+      match /documentos/{clave} {
+        allow read: if esDuenio(uid) || esAdmin();
+        allow delete: if esDuenio(uid) || esAdmin();
+        allow create, update: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Abogados: perfil PÚBLICO
+    //
+    // Proyección que consume el buscador y el visualizador de perfil. No
+    // contiene fecha de nacimiento, teléfono personal ni rutas de documentos.
+    // ---------------------------------------------------------------
+
+    match /perfilesPublicosAbogados/{uid} {
+      allow get, list: if autenticado();
+
+      // El perfil nace no verificado y con los agregados en cero. Los ceros
+      // son obligatorios (no simplemente ausentes) porque el buscador ordena
+      // por calificacionPromedio, y Firestore excluye de un orderBy los
+      // documentos que no tienen ese campo: un abogado recién registrado
+      // desaparecería del directorio.
+      allow create: if esDuenio(uid)
+                    && request.resource.data.verificado == false
+                    && request.resource.data.calificacionPromedio == 0
+                    && request.resource.data.cantidadResenas == 0;
+
+      // El administrador también puede crearlo, con los agregados en cero.
+      // Es la única vía no destructiva para publicar a un abogado que se
+      // registró antes de que existiera esta colección: sin esto, su perfil
+      // público solo aparecería si volviera a iniciar sesión, y el
+      // administrador no podría verificarlo nunca.
+      allow create: if esAdmin()
+                    && request.resource.data.calificacionPromedio == 0
+                    && request.resource.data.cantidadResenas == 0;
+
+      // El dueño mantiene su perfil, pero no su verificación ni su
+      // reputación.
+      allow update: if esDuenio(uid)
+                    && noToca(['uid', 'verificado', 'calificacionPromedio', 'cantidadResenas']);
+
+      // El administrador solo administra la verificación. Ni siquiera él
+      // puede tocar los agregados: esos son exclusivos de la Cloud Function.
+      allow update: if esAdmin()
+                    && noToca(['calificacionPromedio', 'cantidadResenas']);
+
+      allow delete: if esAdmin();
+
+      // -------------------------------------------------------------
+      // Reseñas
+      //
+      // El identificador del documento ES el uid del cliente. Eso garantiza
+      // por estructura una única reseña por relación cliente-abogado, sin
+      // depender de ninguna comprobación previa desde Flutter.
+      // -------------------------------------------------------------
+
+      match /resenas/{clienteUid} {
+        allow get, list: if autenticado();
+
+        allow create: if esDuenio(clienteUid)
+                      && clienteUid != uid
+                      && esCliente(clienteUid)
+                      && resenaValida(uid, clienteUid);
+
+        // El autor puede corregir su reseña, pero no reasignarla a otro
+        // abogado ni atribuirla a otro cliente.
+        allow update: if esDuenio(clienteUid)
+                      && clienteUid != uid
+                      && noToca(['abogadoUid', 'clienteUid'])
+                      && resenaValida(uid, clienteUid);
+
+        allow delete: if esDuenio(clienteUid) || esAdmin();
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Abogados: tarjeta PÚBLICA (visitantes sin sesión)
+    //
+    // Proyección mínima de perfilesPublicosAbogados para el directorio que
+    // explora un visitante web: solo los campos que muestra la tarjeta del
+    // buscador y los que usa su búsqueda por texto. No contiene teléfonos,
+    // correo, dirección, redes, experiencia ni descripción, y solo existe
+    // para abogados verificados.
+    //
+    // La escribe únicamente la Cloud Function `sincronizarTarjetaAbogado`
+    // (Admin SDK, que no pasa por estas reglas); ningún usuario puede
+    // escribirla. El límite acota cuántas tarjetas trae una sola consulta:
+    // es el mismo tope de 100 que usa el buscador.
+    // ---------------------------------------------------------------
+
+    match /tarjetasAbogados/{uid} {
+      allow get: if true;
+      allow list: if request.query.limit <= 100;
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // PQRS
+    //
+    // El usuario crea su PQRS con sus propios datos y nada más. El radicado,
+    // el estado y el registro del correo los escribe solo la Cloud Function
+    // (Admin SDK, que no pasa por estas reglas). Una vez creada, el usuario
+    // ya no puede modificarla.
+    // ---------------------------------------------------------------
+
+    // Una evidencia solo puede apuntar a la carpeta de esta misma PQRS del
+    // propio usuario, con uno de los nombres y tipos que admite Storage.
+    function evidenciaPqrsValida(evidencia, uid, pqrsId) {
+      return evidencia is map
+          && evidencia.keys().hasOnly(['nombreArchivo', 'ruta', 'tipoContenido', 'tamanio'])
+          && evidencia.keys().hasAll(['nombreArchivo', 'ruta', 'tipoContenido', 'tamanio'])
+          && evidencia.nombreArchivo is string
+          && evidencia.nombreArchivo.size() > 0
+          && evidencia.nombreArchivo.size() <= 255
+          && evidencia.ruta is string
+          && evidencia.ruta.matches('pqrs/' + uid + '/' + pqrsId + '/evidencia_[1-3][.](pdf|png|jpg)')
+          && evidencia.tipoContenido in ['application/pdf', 'image/png', 'image/jpeg']
+          && evidencia.tamanio is int
+          && evidencia.tamanio > 0
+          && evidencia.tamanio <= 10 * 1024 * 1024;
+    }
+
+    // Las reglas no tienen bucles: con un máximo de 3 evidencias alcanza con
+    // revisar cada posición.
+    function evidenciasPqrsValidas(lista, uid, pqrsId) {
+      return lista is list
+          && lista.size() <= 3
+          && (lista.size() < 1 || evidenciaPqrsValida(lista[0], uid, pqrsId))
+          && (lista.size() < 2 || evidenciaPqrsValida(lista[1], uid, pqrsId))
+          && (lista.size() < 3 || evidenciaPqrsValida(lista[2], uid, pqrsId));
+    }
+
+    match /pqrs/{pqrsId} {
+      // hasOnly impide que el cliente envíe radicado, estado,
+      // correoConfirmacion o cualquier campo administrativo futuro.
+      allow create: if autenticado()
+                    && request.resource.data.keys().hasOnly(['uid', 'tipo', 'descripcion', 'evidencias', 'creadoEn', 'actualizadoEn'])
+                    && request.resource.data.keys().hasAll(['uid', 'tipo', 'descripcion', 'evidencias', 'creadoEn', 'actualizadoEn'])
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.tipo in ['peticion', 'queja', 'reclamo', 'solicitud']
+                    && request.resource.data.descripcion is string
+                    && request.resource.data.descripcion.trim().size() > 0
+                    && request.resource.data.descripcion.size() <= 2000
+                    // Obliga a usar FieldValue.serverTimestamp().
+                    && request.resource.data.creadoEn == request.time
+                    && request.resource.data.actualizadoEn == request.time
+                    && evidenciasPqrsValidas(request.resource.data.evidencias, request.auth.uid, pqrsId);
+
+      // Cada usuario ve solo sus propias PQRS; el administrador, todas.
+      allow get, list: if esAdmin()
+                       || (autenticado() && resource.data.uid == request.auth.uid);
+
+      // Solo el administrador la actualiza (por ejemplo, su estado), y ni
+      // siquiera él puede cambiar el radicado, el dueño o la fecha.
+      allow update: if esAdmin() && noToca(['uid', 'radicado', 'creadoEn']);
+      allow delete: if esAdmin();
+    }
+
+    // Consecutivo del radicado por año. Lo escribe solo la Cloud Function.
+    match /contadoresPqrs/{anio} {
+      allow read, write: if false;
+    }
+
+    // Cualquier otra ruta queda denegada por omisión: Firestore no concede
+    // nada que no esté explícitamente permitido arriba.
+  }
+}

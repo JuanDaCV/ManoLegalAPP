@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "1035803426252",
+    "project_id": "claude-manolegal",
+    "storage_bucket": "claude-manolegal.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1035803426252:android:6c31b2f38475774bc93169",
+        "android_client_info": {
+          "package_name": "com.example.desarrollo"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1035803426252-q3ft665h301ia66rd93rvqfs13pqhtul.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.desarrollo",
+            "certificate_hash": "6a551a4eeb13f62823e45a914ecf06a8dd6d41c3"
+          }
+        },
+        {
+          "client_id": "1035803426252-onotbknhsrf0138e0cjkl5fhilo7n45f.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAv6Rf4CPrgOkw3lM-j_QLaUt-ugYbZnlk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1035803426252-onotbknhsrf0138e0cjkl5fhilo7n45f.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1035803426252-mpejnfnf0c1h7a0m2pl7jgttuj0onud0.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.desarrollo"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

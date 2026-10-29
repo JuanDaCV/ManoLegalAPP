@@ -1,0 +1,35 @@
+# .gitignore de la raíz de ManoLegalAPP. Se suma a desarrollo/.gitignore y a
+# los de android/, ios/, functions/ y pruebas_reglas/, que ya cubren build/,
+# .dart_tool/, node_modules/, *.log, key.properties, *.jks y *.keystore.
+
+# Artefactos de compilación y caché local de Firebase
+desarrollo/build/
+desarrollo/.firebase/
+**/firebase-debug*.log
+**/firestore-debug*.log
+**/ui-debug*.log
+*.apk
+*.aab
+
+# Credenciales y configuración local (nunca se publican)
+**/key.properties
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pem
+**/.env
+**/.env.*
+**/*service-account*.json
+**/*serviceAccount*.json
+**/.runtimeconfig.json
+**/application_default_credentials.json
+
+# Respaldos y archivos locales
+**/*.bak
+desarrollo/android/app/google-services.json.bak
+desarrollo/ios/Flutter/ephemeral/
+
+# Editores
+.idea/
+*.iml
+.vscode/

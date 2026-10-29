@@ -1,0 +1,107 @@
+rules_version = '2';
+
+// Reglas de seguridad de Cloud Storage para ManoLegal V2.
+//
+// Distinción deliberada entre los dos tipos de archivo que guarda un abogado:
+//
+//   - FOTO DE PERFIL: es parte del directorio público. La aplicación guarda su
+//     getDownloadURL() en Firestore, y esa URL lleva un token que la vuelve
+//     legible por cualquiera que la tenga. Es exactamente el comportamiento
+//     deseado para una foto pública.
+//
+//   - DOCUMENTOS DE VERIFICACIÓN (cédula, tarjeta profesional, certificado
+//     RNA, diploma, antecedentes): son privados. La aplicación NUNCA llama a
+//     getDownloadURL() sobre ellos. Guarda únicamente la ruta, y el panel de
+//     administrador descarga los bytes con ref(ruta).getData(), que sí pasa
+//     por estas reglas. Así la documentación queda genuinamente protegida.
+//
+// Las evidencias de PQRS siguen el mismo criterio que los documentos de
+// verificación: privadas, solo del dueño y del administrador.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    function esDuenio(uid) {
+      return autenticado() && request.auth.uid == uid;
+    }
+
+    // Misma identidad administrativa que en firestore.rules. El token de
+    // Authentication expone el correo también en las reglas de Storage, así
+    // que no hacen falta custom claims.
+    function esAdmin() {
+      return autenticado() && request.auth.token.email == 'admin@manolegal.com';
+    }
+
+    function esImagen() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function esDocumentoAdmitido() {
+      return request.resource.contentType == 'application/pdf'
+          || request.resource.contentType.matches('image/.*');
+    }
+
+    // -----------------------------------------------------------------
+    // Foto de perfil pública
+    // -----------------------------------------------------------------
+
+    match /abogados/{uid}/foto_perfil.jpg {
+      allow read: if true;
+      allow write: if esDuenio(uid)
+                   && esImagen()
+                   && request.resource.size < 5 * 1024 * 1024;
+      allow delete: if esDuenio(uid) || esAdmin();
+    }
+
+    // -----------------------------------------------------------------
+    // Documentos de verificación (privados)
+    // -----------------------------------------------------------------
+
+    match /abogados/{uid}/documentos/{archivo} {
+      allow read: if esDuenio(uid) || esAdmin();
+      allow write: if esDuenio(uid)
+                   && esDocumentoAdmitido()
+                   && request.resource.size < 10 * 1024 * 1024;
+      allow delete: if esDuenio(uid) || esAdmin();
+    }
+
+    // -----------------------------------------------------------------
+    // Evidencias de PQRS (privadas)
+    //
+    // Mismo criterio que los documentos de verificación: la aplicación
+    // guarda solo la ruta y nunca pide una URL de descarga. Una evidencia ya
+    // enviada no se puede sobrescribir, y el nombre del archivo limita a 3
+    // evidencias por PQRS. El dueño puede borrar sus archivos porque lo
+    // necesita para deshacer un envío que falló.
+    // -----------------------------------------------------------------
+
+    function esEvidenciaPqrsAdmitida() {
+      return request.resource.contentType in ['application/pdf', 'image/png', 'image/jpeg'];
+    }
+
+    match /pqrs/{uid}/{pqrsId}/{archivo} {
+      allow read: if esDuenio(uid) || esAdmin();
+      // En Storage toda subida se evalúa como `create`, también la que
+      // sobrescribe un archivo existente (`update` es solo para cambios de
+      // metadata). Lo que impide sobrescribir es exigir que no exista.
+      allow create: if esDuenio(uid)
+                    && resource == null
+                    && archivo.matches('evidencia_[1-3][.](pdf|png|jpg)')
+                    && esEvidenciaPqrsAdmitida()
+                    && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if esDuenio(uid) || esAdmin();
+    }
+
+    // -----------------------------------------------------------------
+    // Todo lo demás queda cerrado de forma explícita.
+    // -----------------------------------------------------------------
+
+    match /{rutaCompleta=**} {
+      allow read, write: if false;
+    }
+  }
+}

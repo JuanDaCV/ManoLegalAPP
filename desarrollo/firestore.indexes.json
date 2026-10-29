@@ -1,0 +1,55 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "perfilesPublicosAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "verificado", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "perfilesPublicosAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "especialidad", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "perfilesPublicosAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "especialidad", "order": "ASCENDING" },
+        { "fieldPath": "verificado", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tarjetasAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "verificado", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tarjetasAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "especialidad", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tarjetasAbogados",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "especialidad", "order": "ASCENDING" },
+        { "fieldPath": "verificado", "order": "ASCENDING" },
+        { "fieldPath": "calificacionPromedio", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

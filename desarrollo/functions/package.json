@@ -1,0 +1,20 @@
+{
+  "name": "manolegal-functions",
+  "description": "Cloud Functions de ManoLegal V2",
+  "main": "index.js",
+  "private": true,
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "logs": "firebase functions:log",
+    "deploy": "firebase deploy --only functions",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.3.0",
+    "nodemailer": "^10.0.10"
+  }
+}
